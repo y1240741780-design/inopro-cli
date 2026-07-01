@@ -326,8 +326,11 @@ except Exception as e:
 # ========== 执行引擎 ==========
 
 
-def run_ironpython(script_body):
-    """执行 IronPython 脚本，返回 (success, output)"""
+def run_ironpython(script_body, live=False):
+    """执行 IronPython 脚本，返回 (success, output)
+
+    live=True: 执行后保持 InoProShop 打开，可实时查看结果
+    """
     config = get_config()
     exe = config["exe"]
     prof = config["profile"]
@@ -347,37 +350,69 @@ def run_ironpython(script_body):
     script_file = os.path.join(tmpdir, "inopro_script_{}.py".format(ts))
     result_file = os.path.join(tmpdir, "inopro_result_{}.txt".format(ts))
 
+    # live 模式：脚本执行完后不退出 InoProShop，保持 GUI 打开
+    script_final = script_body
+    if live:
+        # 替换所有 sys.exit(0) → 写标记后等待（保持 InoProShop 存活）
+        script_final = script_body.replace(
+            "_sys.exit(0)", "rlog('SCRIPT_LIVE_DONE'); _sys.stdin.readline()"
+        )
+        # 也处理 sys.exit(1) → 写错误标记后等待
+        script_final = script_final.replace(
+            "_sys.exit(1)", "rlog('SCRIPT_LIVE_ERROR'); _sys.stdin.readline()"
+        )
+
     # 组装完整脚本
     header = SCRIPT_HEADER.format(result_file.replace("\\", "\\\\"))
-    full_script = header + script_body
+    full_script = header + script_final
 
     with open(script_file, "w", encoding="utf-8") as f:
         f.write(full_script)
 
+    proc = None
     try:
         exe_dir = os.path.dirname(exe)
         env = os.environ.copy()
         env["PATH"] = "{};{}".format(exe_dir, env.get("PATH", ""))
 
-        proc = subprocess.Popen(
-            [exe, "--profile={}".format(prof), "--runscript={}".format(script_file)],
-            cwd=exe_dir,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
+        # live 模式：不捕获管道（避免阻塞 GUI）
+        if live:
+            proc = subprocess.Popen(
+                [exe, "--profile={}".format(prof),
+                 "--runscript={}".format(script_file)],
+                cwd=exe_dir,
+                env=env,
+                # 不捕获输出，让 InoProShop 正常显示 GUI
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        else:
+            proc = subprocess.Popen(
+                [exe, "--profile={}".format(prof),
+                 "--runscript={}".format(script_file)],
+                cwd=exe_dir,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
 
         # 轮询结果文件
         start = time.time()
         timeout = 300
+        done_marker = "SCRIPT_LIVE_DONE" if live else "SCRIPT_SUCCESS"
+        error_markers = ["SCRIPT_LIVE_ERROR" if live else "SCRIPT_ERROR",
+                         "SCRIPT_ERROR"]
+
         while time.time() - start < timeout:
-            if proc.poll() is not None:
+            if not live and proc.poll() is not None:
                 break
             try:
-                with open(result_file, "r", encoding="utf-8", errors="replace") as f:
+                with open(result_file, "r", encoding="utf-8",
+                          errors="replace") as f:
                     content = f.read()
-                if "SCRIPT_SUCCESS" in content or "SCRIPT_ERROR" in content:
-                    proc.kill()
+                if done_marker in content:
+                    break
+                if any(m in content for m in error_markers):
                     break
             except FileNotFoundError:
                 pass
@@ -390,31 +425,54 @@ def run_ironpython(script_body):
         except FileNotFoundError:
             output = "No output captured."
 
-        # 收集进程输出
-        try:
-            stdout, stderr = proc.communicate(timeout=2)
-            if stdout:
-                output += "\n" + stdout.decode("utf-8", errors="replace")
-            if stderr:
-                output += "\n" + stderr.decode("utf-8", errors="replace")
-        except Exception:
-            pass
+        # 非 live 模式：收集进程输出并杀进程
+        if not live:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            try:
+                stdout, stderr = proc.communicate(timeout=2)
+                if stdout:
+                    output += "\n" + stdout.decode("utf-8", errors="replace")
+                if stderr:
+                    output += "\n" + stderr.decode("utf-8", errors="replace")
+            except Exception:
+                pass
 
-        success = "SCRIPT_SUCCESS" in output
+        if live:
+            success = "SCRIPT_LIVE_DONE" in output
+        else:
+            success = "SCRIPT_SUCCESS" in output
         return success, output
 
     finally:
-        for f in [script_file, result_file]:
+        # 清理临时脚本文件（结果文件保留到下次覆盖）
+        for f in [script_file]:
             try:
                 os.unlink(f)
             except Exception:
                 pass
+        # live 模式下不删结果文件太快
+        if not live:
+            for f in [result_file]:
+                try:
+                    os.unlink(f)
+                except Exception:
+                    pass
 
 
 # ========== CLI 入口 ==========
 
 def main():
-    if len(sys.argv) < 2:
+    # 检测 --live 标志
+    live = False
+    args = sys.argv[1:]
+    if "--live" in args:
+        live = True
+        args.remove("--live")
+
+    if len(args) < 1:
         print("InoProShop CLI v{}".format(VERSION))
         print("用法: python inopro.py <命令> [参数...]")
         print()
@@ -430,10 +488,12 @@ def main():
         print("  config                           显示配置")
         print("  status                           检查状态")
         print()
+        print("  --live                            实时模式，InoProShop 保持打开可见")
+        print()
         print("跨电脑: 复制文件 + Python 3.7+ = 即插即用")
         return
 
-    cmd = sys.argv[1]
+    cmd = args[0]
 
     if cmd == "config":
         config = get_config()
@@ -456,7 +516,6 @@ try:
 except Exception as e:
     rlog("SCRIPT_ERROR: " + str(e))
 """)
-            # 只显示有效内容
             for line in output.split("\n"):
                 line = line.strip()
                 if line and "SCRIPT_" not in line:
@@ -470,47 +529,51 @@ except Exception as e:
     success = False
     output = ""
 
+    if live:
+        print("🔴 LIVE 模式 — InoProShop 将保持打开，操作完成后可手动关闭")
+        print()
+
     try:
-        if cmd == "open" and len(sys.argv) >= 3:
-            success, output = run_ironpython(script_open_project(sys.argv[2]))
+        if cmd == "open" and len(args) >= 2:
+            success, output = run_ironpython(script_open_project(args[1]), live=live)
 
         elif cmd == "compile":
-            success, output = run_ironpython(script_compile())
+            success, output = run_ironpython(script_compile(), live=live)
 
         elif cmd == "structure":
-            success, output = run_ironpython(script_get_structure())
+            success, output = run_ironpython(script_get_structure(), live=live)
 
-        elif cmd == "create-pou" and len(sys.argv) >= 4:
-            name = sys.argv[2]
-            pou_type = sys.argv[3]
-            lang = sys.argv[4] if len(sys.argv) > 4 else "st"
-            parent = sys.argv[5] if len(sys.argv) > 5 else ""
+        elif cmd == "create-pou" and len(args) >= 3:
+            name = args[1]
+            pou_type = args[2]
+            lang = args[3] if len(args) > 3 else "st"
+            parent = args[4] if len(args) > 4 else ""
             success, output = run_ironpython(
-                script_create_pou(name, pou_type, lang, parent)
+                script_create_pou(name, pou_type, lang, parent), live=live
             )
 
-        elif cmd == "set-code" and len(sys.argv) >= 5:
-            path = sys.argv[2]
-            decl = sys.argv[3]
-            impl = sys.argv[4]
+        elif cmd == "set-code" and len(args) >= 4:
+            path = args[1]
+            decl = args[2]
+            impl = args[3]
             success, output = run_ironpython(
-                script_set_pou_code(path, decl, impl)
+                script_set_pou_code(path, decl, impl), live=live
             )
 
-        elif cmd == "get-code" and len(sys.argv) >= 3:
-            success, output = run_ironpython(script_get_pou_code(sys.argv[2]))
+        elif cmd == "get-code" and len(args) >= 2:
+            success, output = run_ironpython(script_get_pou_code(args[1]), live=live)
 
-        elif cmd == "create-task" and len(sys.argv) >= 3:
-            name = sys.argv[2]
-            interval = int(sys.argv[3]) if len(sys.argv) > 3 else 4000
-            priority = int(sys.argv[4]) if len(sys.argv) > 4 else 1
+        elif cmd == "create-task" and len(args) >= 2:
+            name = args[1]
+            interval = int(args[2]) if len(args) > 2 else 4000
+            priority = int(args[3]) if len(args) > 3 else 1
             success, output = run_ironpython(
-                script_create_task(name, interval, priority)
+                script_create_task(name, interval, priority), live=live
             )
 
         elif cmd == "raw":
-            code = " ".join(sys.argv[2:]) if len(sys.argv) > 2 else sys.stdin.read()
-            success, output = run_ironpython(code)
+            code = " ".join(args[1:]) if len(args) > 1 else sys.stdin.read()
+            success, output = run_ironpython(code, live=live)
 
         else:
             print("未知命令: {}".format(cmd))
@@ -523,10 +586,17 @@ except Exception as e:
     # 输出结果（过滤标记行）
     for line in output.split("\n"):
         line = line.strip()
-        if line and "SCRIPT_SUCCESS" not in line and "SCRIPT_ERROR" not in line:
+        if line and "SCRIPT_SUCCESS" not in line and "SCRIPT_ERROR" not in line \
+           and "SCRIPT_LIVE_DONE" not in line and "SCRIPT_LIVE_ERROR" not in line:
             print(line)
 
-    print("\nSUCCESS" if success else "\nFAILED")
+    if success:
+        print("\n✅ SUCCESS")
+        if live:
+            print("📌 InoProShop 仍保持打开，你可以在界面上查看/编辑。")
+            print("   完成后手动关闭 InoProShop 即可。")
+    else:
+        print("\n❌ FAILED")
 
 
 if __name__ == "__main__":
