@@ -343,7 +343,7 @@ def run_ironpython(script_body, live=False):
             "请设置环境变量 INOPRO_PATH 或创建 inopro_config.json:\n"
             '{\n  "exe": "D:\\\\Inovance Control\\\\InoProShop'
             '\\\\CODESYS\\\\Common\\\\InoProShop.exe",\n'
-            '  "profile": "InoProShop(V1.9.1.6)"\n}'
+            '  "profile": "InoProShop(V1.8.1.3)"\n}'
         )
 
     # 创建临时文件
