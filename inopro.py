@@ -84,16 +84,18 @@ def _detect_profile(exe_path):
                 content = f.read()
                 if "1.9" in content:
                     return "InoProShop(V1.9.1.6)"
+                if "1.8" in content or "1.7" in content:
+                    return "InoProShop(V1.8.1.3)"
         except Exception:
             pass
-    return "InoProShop(V1.9.1.6)"
+    return "InoProShop(V1.8.1.3)"
 
 
 def get_config():
     """获取配置，优先使用配置文件，其次自动检测"""
     script_dir = os.path.dirname(os.path.abspath(__file__))
     config_file = os.path.join(script_dir, "inopro_config.json")
-    config = {"exe": None, "profile": "InoProShop(V1.9.1.6)"}
+    config = {"exe": None, "profile": "InoProShop(V1.8.1.3)"}
 
     if os.path.exists(config_file):
         try:
